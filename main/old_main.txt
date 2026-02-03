@@ -1,0 +1,48 @@
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/gpio.h"
+#include "esp_rom_sys.h"
+
+#include "hc595_sequence.h"
+
+#define PIN_SER  GPIO_NUM_12
+#define PIN_CLK  GPIO_NUM_14
+#define PIN_RCK  GPIO_NUM_13
+
+
+static void hc595_gpio_init(void)
+{
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << PIN_SER) |
+                        (1ULL << PIN_CLK) |
+                        (1ULL << PIN_RCK),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&cfg);
+}
+
+static void hc595_play_sequence(void)
+{
+    for (uint32_t i = 0; i < hc595_sequence_len; i++) {
+        gpio_set_level(PIN_SER, hc595_sequence[i].ser);
+        gpio_set_level(PIN_CLK, hc595_sequence[i].clk);
+        gpio_set_level(PIN_RCK, hc595_sequence[i].rck);
+
+        if (hc595_sequence[i].delay_us > 0) {
+            esp_rom_delay_us(hc595_sequence[i].delay_us);
+        }
+    }
+}
+
+void app_main(void)
+{
+    hc595_gpio_init();
+
+    while (1) {
+        hc595_play_sequence();
+        vTaskDelay(pdMS_TO_TICKS(1000)); // replay a cada 1s
+    }
+}

@@ -1,120 +1,215 @@
 #include <stdio.h>
 #include <stdint.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
-
 #include "driver/gpio.h"
-#include "esp_timer.h"
-#include "esp_log.h"
+#include "esp_rom_sys.h"
 
-#include "capture_data.h"
+/* ===== CONFIG CHIP ===== */
+#define esp32_chip 1
 
-/* ================= GPIO ================= */
+#if esp32_chip
+    #define PIN_DATA   12
+    #define PIN_CLK    14
+    #define PIN_LATCH  13
+#endif
 
-#define PIN_SER   GPIO_NUM_14
-#define PIN_SCK   GPIO_NUM_12
-#define PIN_RCK   GPIO_NUM_13
+/* ===== DEFINIÇÕES DE SEGMENTOS =====
+   bit0 → A
+   bit1 → B
+   bit2 → C
+   bit3 → D
+   bit4 → E
+   bit5 → F
+   bit6 → G
+*/
 
-/* ================= Replay ================= */
+#define DISPLAY_LEFT    0x0EFF
+#define DISPLAY_RIGTH   0x0DFF
 
-#define REPLAY_DONE_BIT (1 << 0)
+#define SEG1_A (1 << 0)
+#define SEG1_B (1 << 1)
+#define SEG1_C (1 << 2)
+#define SEG1_D (1 << 3)
+#define SEG1_E (1 << 4)
+#define SEG1_F (1 << 5)
+#define SEG1_G (1 << 6)
+#define SEG1_N (1 << 14)
 
-static const char *TAG = "74HC595_REPLAY";
+#define SEG2_A (1 << 7)
+#define SEG2_B (1 << 8)
+#define SEG2_C (1 << 9)
+#define SEG2_D (1 << 10)
+#define SEG2_E (1 << 11)
+#define SEG2_F (1 << 12)
+#define SEG2_G (1 << 13)
+#define SEG2_N (1 << 15)
 
-static volatile uint32_t idx = 0;
-static esp_timer_handle_t replay_timer;
-static EventGroupHandle_t replay_event;
+// #define SEG2_A (1 << 7)
+// #define SEG2_B (1 << 8)
+// #define SEG2_C (1 << 9)
+// #define SEG2_D (1 << 10)
+// #define SEG2_E (1 << 11)
+// #define SEG2_F (1 << 12)
+// #define SEG2_G (1 << 13)
 
-/* ================= Timer callback ================= */
+/* ===== SHIFT ===== */
 
-static void replay_timer_cb(void *arg)
+static inline void clk_pulse(void)
 {
-    /* aplica níveis lógicos do evento atual */
-    gpio_set_level(PIN_SER, ser[idx]);
-    gpio_set_level(PIN_SCK, sck[idx]);
-    gpio_set_level(PIN_RCK, rck[idx]);
-
-    idx++;
-
-    /* fim do replay */
-    if (idx >= SIGNAL_LEN) {
-        xEventGroupSetBits(replay_event, REPLAY_DONE_BIT);
-        return;
-    }
-
-    /* calcula delta real entre eventos (ns → us) */
-    uint64_t delta_ns = timestamp_ns[idx] - timestamp_ns[idx - 1];
-    uint64_t delta_us = delta_ns / 1000;
-
-    if (delta_us == 0) {
-        delta_us = 1; // esp_timer não aceita 0
-    }
-
-    esp_timer_start_once(replay_timer, delta_us);
+    gpio_set_level(PIN_CLK, 0);
+    esp_rom_delay_us(12);
+    gpio_set_level(PIN_CLK, 1);
+    esp_rom_delay_us(12);
 }
 
-/* ================= Start replay ================= */
-
-static void start_replay(void)
+void shift16(uint16_t v)
 {
-    idx = 0;
+    gpio_set_level(PIN_LATCH, 1);
+    // vTaskDelay(1);
+    // printf("\n");
+    // printf("binario: ");
+    // LSB first (como seu hardware exige)
+    for (int i = 0; i < 16; i++) {
+        if(i==8){
+            esp_rom_delay_us(300);
+            gpio_set_level(PIN_LATCH, 0);
+        }
 
-    if (!replay_timer) {
-        const esp_timer_create_args_t args = {
-            .callback = replay_timer_cb,
-            .dispatch_method = ESP_TIMER_TASK,
-            .name = "replay_timer"
-        };
-        ESP_ERROR_CHECK(esp_timer_create(&args, &replay_timer));
+        int bit = (v >> (15-i)) & 1; // Pega o bit atual
+        printf("%d", bit);      // Imprime 0 ou 1
+        gpio_set_level(PIN_DATA, bit);
+        clk_pulse();
     }
-
-    /* agenda o primeiro evento */
-    uint64_t first_us = timestamp_ns[0] / 1000;
-    if (first_us == 0) {
-        first_us = 1;
-    }
-
-    ESP_ERROR_CHECK(esp_timer_start_once(replay_timer, first_us));
+    // printf("\n");
 }
 
-/* ================= Main ================= */
+/* ===== GERA PADRÃO DO DISPLAY ESQUERDO =====
+   enable = 0x7F
+   segmentos ativos em LOW
+*/
+
+uint16_t make_lef_right_segments(uint16_t display1, uint16_t seg_byte)
+{
+
+    if (display1 & SEG1_A) {
+        seg_byte &= ~(1 << 7);
+    }
+    if (display1 & SEG1_B){
+        seg_byte &= ~(1 << 6);
+    } 
+    if (display1 & SEG1_C){
+        seg_byte &= ~(1 << 5);
+    }
+
+    if (display1 & SEG1_D){
+        seg_byte &= ~(1 << 3);
+    }
+
+    if (display1 & SEG1_E){
+        seg_byte &= ~(1 << 2);
+    } 
+
+    if (display1 & SEG1_F){
+        seg_byte &= ~(1 << 1);
+    } 
+    if (display1 & SEG1_G){
+        seg_byte &= ~(1 << 0);
+    }
+
+    // return ((uint16_t)seg_byte << 8) | 0x7F;
+    return ((uint16_t)seg_byte);
+
+}
+
+/* ===== DÍGITOS 0–9 ===== */
+
+uint8_t digit_to_segments_left(uint8_t d)
+{
+    switch (d) {
+        case 0: return SEG1_A|SEG1_B|SEG1_C|SEG1_D|SEG1_E|SEG1_F;
+        case 1: return SEG1_B|SEG1_C;
+        case 2: return SEG1_A|SEG1_B|SEG1_D|SEG1_E|SEG1_G;
+        case 3: return SEG1_A|SEG1_B|SEG1_C|SEG1_D|SEG1_G;
+        case 4: return SEG1_B|SEG1_C|SEG1_F|SEG1_G;
+        case 5: return SEG1_A|SEG1_C|SEG1_D|SEG1_F|SEG1_G;
+        case 6: return SEG1_A|SEG1_C|SEG1_D|SEG1_E|SEG1_F|SEG1_G;
+        case 7: return SEG1_A|SEG1_B|SEG1_C;
+        case 8: return SEG1_A|SEG1_B|SEG1_C|SEG1_D|SEG1_E|SEG1_F|SEG1_G;
+        case 9: return SEG1_A|SEG1_B|SEG1_C|SEG1_D|SEG1_F|SEG1_G;
+        default: return 0;
+    }
+}
+
+
+uint8_t digit_to_segments_right(uint8_t d)
+{
+    switch (d) {
+        case 0: return SEG2_A|SEG2_B|SEG2_C|SEG2_D|SEG2_E|SEG2_F;
+        case 1: return SEG2_B|SEG2_C;
+        case 2: return SEG2_A|SEG2_B|SEG2_D|SEG2_E|SEG2_G;
+        case 3: return SEG2_A|SEG2_B|SEG2_C|SEG2_D|SEG2_G;
+        case 4: return SEG2_B|SEG2_C|SEG2_F|SEG2_G;
+        case 5: return SEG2_A|SEG2_C|SEG2_D|SEG2_F|SEG2_G;
+        case 6: return SEG2_A|SEG2_C|SEG2_D|SEG2_E|SEG2_F|SEG2_G;
+        case 7: return SEG2_A|SEG2_B|SEG2_C;
+        case 8: return SEG2_A|SEG2_B|SEG2_C|SEG2_D|SEG2_E|SEG2_F|SEG2_G;
+        case 9: return SEG2_A|SEG2_B|SEG2_C|SEG2_D|SEG2_F|SEG2_G;
+        default: return 0;
+    }
+}
+/* ===== MAIN ===== */
 
 void app_main(void)
 {
-    gpio_config_t cfg = {
+    gpio_config_t io = {
         .mode = GPIO_MODE_OUTPUT,
         .pin_bit_mask =
-            (1ULL << PIN_SER) |
-            (1ULL << PIN_SCK) |
-            (1ULL << PIN_RCK)
+            (1ULL << PIN_DATA) |
+            (1ULL << PIN_CLK)  |
+            (1ULL << PIN_LATCH),
     };
-    gpio_config(&cfg);
+    gpio_config(&io);
 
-    gpio_set_level(PIN_SER, 0);
-    gpio_set_level(PIN_SCK, 0);
-    gpio_set_level(PIN_RCK, 0);
+    gpio_set_level(PIN_DATA, 0);
+    gpio_set_level(PIN_CLK, 0);
+    gpio_set_level(PIN_LATCH, 1);
 
-    replay_event = xEventGroupCreate();
-
-    ESP_LOGI(TAG, "Replay iniciado (%u eventos)", SIGNAL_LEN);
+    printf("\n=== TESTE DISPLAY ESQUERDO ===\n");
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     while (1) {
-        xEventGroupClearBits(replay_event, REPLAY_DONE_BIT);
+        // shift16(make_lef_right_segments(digit_to_segments_left(1), DISPLAY_LEFT));
+        // vTaskDelay(100);
+        // shift16(make_lef_right_segments(digit_to_segments_left(0), DISPLAY_RIGTH));
+        // vTaskDelay(100);
 
-        start_replay();
+        // for(uint16_t i =0; i< 16; i++){
+        //     shift16(0x14 | (i<<8));
+        //     vTaskDelay(100);
+        //     for(uint16_t j =0; j< 16; j++){
+        //         shift16(0x50 | (j<<8));
+        //         vTaskDelay(100);
 
-        /* bloqueia até terminar — sem delay, sem polling */
-        xEventGroupWaitBits(
-            replay_event,
-            REPLAY_DONE_BIT,
-            pdTRUE,
-            pdFALSE,
-            portMAX_DELAY
-        );
+        //     }
+        // }
 
-        ESP_LOGI(TAG, "Replay finalizado");
-        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        while(1){
+            for(uint16_t i =0; i< 1000; i++){
+                shift16(make_lef_right_segments(digit_to_segments_left(0x9), DISPLAY_LEFT));
+                esp_rom_delay_us(100);
+                shift16(make_lef_right_segments(digit_to_segments_left(0x6), DISPLAY_RIGTH));
+                esp_rom_delay_us(100);
+            }
+            vTaskDelay(1);
+            for(uint16_t i =0; i< 1000; i++){
+                shift16(make_lef_right_segments(digit_to_segments_left(0x3), DISPLAY_LEFT));
+                esp_rom_delay_us(100);
+                shift16(make_lef_right_segments(digit_to_segments_left(0x4), DISPLAY_RIGTH));
+                esp_rom_delay_us(100);
+            }
+        }
+        
     }
 }
